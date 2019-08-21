@@ -38,7 +38,23 @@ def _handle_update_table(func):
             db.insert('preassembly_updates', corpus_init=is_corpus_init,
                       run_datetime=run_datetime)
         return completed
-    return run_and_record_update
+    return wrap_preassembly
+
+
+def _tag(tag):
+
+    def tag_wrapper(meth):
+
+        @wraps(meth)
+        def tagged_method(pam, *args, **kwargs):
+            tag_set = pam._set_tag(tag)
+            res = meth(pam, *args, **kwargs)
+            if tag_set:
+                pam._unset_tag()
+            return res
+
+        return tagged_method
+    return tag_wrapper
 
 
 class IndraDBPreassemblyError(Exception):
