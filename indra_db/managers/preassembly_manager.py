@@ -28,15 +28,17 @@ HERE = path.dirname(path.abspath(__file__))
 ipa_logger.setLevel(logging.INFO)
 
 
-def _handle_update_table(func):
-    @wraps(func)
-    def run_and_record_update(cls, db, *args, **kwargs):
-        run_datetime = datetime.utcnow()
-        completed = func(cls, db, *args, **kwargs)
-        if completed:
-            is_corpus_init = (func.__name__ == 'create_corpus')
-            db.insert('preassembly_updates', corpus_init=is_corpus_init,
-                      run_datetime=run_datetime)
+def _preassembly_wrapper(meth):
+    @wraps(meth)
+    def wrap_preassembly(pam, db, *args, **kwargs):
+        pam._register_preassembly_start(meth.__name__, *args, **kwargs)
+        try:
+            completed = meth(pam, db, *args, **kwargs)
+        except Exception as e:
+            # Pickle the entire manager for debugging.
+            pam.fossilize(e)
+            completed = False
+        pam._register_preassembly_end(db, completed, *args, **kwargs)
         return completed
     return wrap_preassembly
 
@@ -251,7 +253,8 @@ class PreassemblyManager(object):
 
         return new_unique_stmts, evidence_links, agent_tuples
 
-    @_handle_update_table
+    @_preassembly_wrapper
+    @_tag('create')
     def create_corpus(self, db, continuing=False):
         """Initialize the table of preassembled statements.
 
@@ -368,10 +371,9 @@ class PreassemblyManager(object):
         self._log("Found %d new statement ids." % len(all_new_stmt_ids))
         return all_new_stmt_ids
 
+    @_tag('supplement')
     def _supplement_statements(self, db, continuing=False):
         """Supplement the preassembled statements with the latest content."""
-        self.__tag = 'supplement'
-
         last_update = self._get_latest_updatetime(db)
         start_date = datetime.utcnow()
         self._log("Latest update was: %s" % last_update)
@@ -434,6 +436,7 @@ class PreassemblyManager(object):
         self._log("Found %d new pa statements." % len(new_mk_set))
         return start_date, end_date
 
+    @_tag('supplement')
     def _supplement_support(self, db, start_date, end_date, continuing=False):
         """Calculate the support for the given date range of pa statements."""
         # If we are continuing, check for support links that were already found
@@ -522,10 +525,10 @@ class PreassemblyManager(object):
                       % len(new_support_links))
             db.copy('pa_support_links', new_support_links,
                     ('supported_mk_hash', 'supporting_mk_hash'))
-        self.__tag = 'Unpurposed'
         return
 
-    @_handle_update_table
+    @_preassembly_wrapper
+    @_tag('supplement')
     def supplement_corpus(self, db, continuing=False):
         """Update the table of preassembled statements.
 
