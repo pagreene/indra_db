@@ -1,7 +1,7 @@
 import json
 import pickle
 import logging
-from os import path, remove
+from os import path, remove, listdir, makedirs
 from functools import wraps
 from datetime import datetime
 from collections import defaultdict
@@ -45,6 +45,9 @@ class IndraDBPreassemblyError(Exception):
     pass
 
 
+DATE_FMT = '%Y%m%d_%H%M%S'
+
+
 class PreassemblyManager(object):
     """Class used to manage the preassembly pipeline
 
@@ -64,8 +67,63 @@ class PreassemblyManager(object):
         self.pa = Preassembler(hierarchies)
         self.__tag = 'Unpurposed'
         self.__print_logs = print_logs
-        self.pickle_stashes = None
+
+        # Variables set during preassembly.
+        self.__original_start = None
+        self.__pa_start = None
+        self.__pa_variant = None
+        self.__cache = None
+        self.__continuing = None
         return
+
+    def _set_tag(self, tag):
+        if self.__tag == 'Unpurposed':
+            self.__tag = tag
+            return True
+        return False
+
+    def _unset_tag(self):
+        self.__tag = 'Unpurposed'
+
+    def fossilize(self, error=None):
+        pkl_file = 'manager_fossil_%s.pkl' % self.__pa_start.strftime(DATE_FMT)
+
+        with open(path.join(self.__cache, pkl_file), 'wb') as f:
+            pickle.dump({'preassembly_manager': self, 'error': error}, f)
+
+        return
+
+    def _register_preassembly_start(self, method_name, continuing=False):
+        self.__pa_start = datetime.utcnow()
+        self.__pa_variant = method_name
+        self.__continuing = continuing
+        if continuing:
+            superdir = path.join(HERE, '.%s_caches' % method_name)
+            subdir = max(listdir(superdir),
+                         key=lambda name: datetime.strptime(name, DATE_FMT))
+            self.__cache = path.join(superdir, subdir)
+            self.__original_start = datetime.strptime(subdir, DATE_FMT)
+        else:
+            self.__original_start = self.__pa_start
+            # Create the cache
+            self.__cache = path.join(HERE, '.%s_caches' % method_name,
+                                     self.__pa_start.strftime(DATE_FMT))
+            makedirs(self.__cache)
+
+        return
+
+    def _register_preassembly_end(self, db, completed):
+        if completed:
+            is_corpus_init = (self.__pa_variant == 'create_corpus')
+            db.insert('preassembly_updates', corpus_init=is_corpus_init,
+                      run_datetime=self.__pa_start)
+
+        self.__pa_start = None
+        self.__pa_variant = None
+        self.__original_start = None
+        self.__cache = None
+        self.__continuing = None
+        pass
 
     def _get_latest_updatetime(self, db):
         """Get the date of the latest update."""
@@ -281,10 +339,6 @@ class PreassemblyManager(object):
             db.copy('pa_support_links', support_links,
                     ('supported_mk_hash', 'supporting_mk_hash'))
 
-        # Delete the pickle cache
-        if path.exists(sid_cache_fname):
-            remove(sid_cache_fname)
-
         return True
 
     def _get_new_stmt_ids(self, db):
@@ -362,13 +416,10 @@ class PreassemblyManager(object):
             self._log("Adjusted old mk set: %d" % len(old_mk_set))
 
         self._log("Found %d new pa statements." % len(new_mk_set))
-        self.__tag = 'Unpurposed'
         return start_date, end_date
 
     def _supplement_support(self, db, start_date, end_date, continuing=False):
         """Calculate the support for the given date range of pa statements."""
-        self.__tag = 'supplement'
-
         # If we are continuing, check for support links that were already found
         support_link_stash = 'new_support_links.pkl'
         self.pickle_stashes.append(support_link_stash)
