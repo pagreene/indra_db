@@ -152,6 +152,28 @@ class PreassemblyManager(object):
             return None
         return max([u.run_datetime for u in update_list])
 
+    def _run_cached(self, func, *args, **kwargs):
+        # Define the path to the pickle.
+        pkl_path = path.join(self.__cache, func.__name__ + "_results")
+
+        # If we are continuing, just reload the content from the cache.
+        if self.__continuing and path.exists(pkl_path):
+            with open(pkl_path, 'rb') as f:
+                self._log("Loading %s results from %s."
+                          % (func.__name__, pkl_path))
+                return pickle.load(f)
+
+        # Run the function.
+        ret = func(*args, **kwargs)
+
+        # Dump the results to the cache.
+        with open(pkl_path, 'wb') as f:
+            self._log("Dumping results of %s to %s."
+                      % (func.__name__, pkl_path))
+            pickle.dump(ret, f)
+
+        return ret
+
     def _raw_sid_stmt_iter(self, db, id_set, do_enumerate=False):
         """Return a generator over statements with the given database ids."""
         def _fixed_raw_stmt_from_json(s_json, tr):
@@ -267,18 +289,8 @@ class PreassemblyManager(object):
 
         For more detail on preassembly, see indra/preassembler/__init__.py
         """
-        self.__tag = 'create'
-
         # Get filtered statement ID's.
-        sid_cache_fname = path.join(HERE, 'stmt_id_cache.pkl')
-        if continuing and path.exists(sid_cache_fname):
-            with open(sid_cache_fname, 'rb') as f:
-                stmt_ids = pickle.load(f)
-        else:
-            # Get the statement ids.
-            stmt_ids = distill_stmts(db)
-            with open(sid_cache_fname, 'wb') as f:
-                pickle.dump(stmt_ids, f)
+        stmt_ids = self._run_cached(distill_stmts, db)
 
         # Handle the possibility we're picking up after an earlier job...
         done_pa_ids = set()
