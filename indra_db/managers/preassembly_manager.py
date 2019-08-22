@@ -36,9 +36,10 @@ def _preassembly_wrapper(meth):
             completed = meth(pam, db, *args, **kwargs)
         except Exception as e:
             # Pickle the entire manager for debugging.
+            logger.exception(e)
             pam.fossilize(e)
             completed = False
-        pam._register_preassembly_end(db, completed, *args, **kwargs)
+        pam._register_preassembly_end(db, completed)
         return completed
     return wrap_preassembly
 
