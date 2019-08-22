@@ -93,6 +93,17 @@ class PreassemblyManager(object):
         self.__pa_variant = None
         self.__cache = None
         self.__continuing = None
+
+        # Variablues used during preassembly
+        self.raw_sids = None
+        self.stmts = None
+        self.cleaned_stmts = None
+        self.new_pa_stmts = None
+        self.new_agent_tuples = None
+        self.new_evidence_links = None
+        self.uuid_sid_dict = None
+        self.mk_done = None
+        self.mk_new = None
         return
 
     def _set_tag(self, tag):
@@ -200,7 +211,7 @@ class PreassemblyManager(object):
 
         return ret
 
-    def _raw_sid_stmt_iter(self, db, id_set, do_enumerate=False):
+    def _raw_sid_stmt_iter(self, db, do_enumerate=False):
         """Return a generator over statements with the given database ids."""
         def _fixed_raw_stmt_from_json(s_json, tr):
             stmt = _stmt_from_json(s_json)
@@ -212,7 +223,7 @@ class PreassemblyManager(object):
             return stmt
 
         i = 0
-        for stmt_id_batch in batch_iter(id_set, self.batch_size):
+        for stmt_id_batch in batch_iter(self.raw_sids, self.batch_size):
             subres = (db.filter_query([db.RawStatements.id,
                                       db.RawStatements.json,
                                       db.TextRef],
@@ -230,76 +241,84 @@ class PreassemblyManager(object):
                 yield data
 
     @clockit
-    def _extract_and_push_unique_statements(self, db, raw_sids, num_stmts,
-                                            mk_done=None):
+    def _extract_and_push_unique_statements(self, db):
         """Get the unique Statements from the raw statements."""
         self._log("There are %d distilled raw statement ids to preassemble."
-                  % len(raw_sids))
+                  % len(self.raw_sids))
 
-        if mk_done is None:
-            mk_done = set()
+        self.mk_new = self._get_cached_set('new_mk')
 
-        new_mk_set = set()
-        num_batches = num_stmts/self.batch_size
-        for i, stmt_tpl_batch in self._raw_sid_stmt_iter(db, raw_sids, True):
-            self._log("Processing batch %d/%d of %d/%d statements."
-                      % (i, num_batches, len(stmt_tpl_batch), num_stmts))
+        num_batches = len(self.raw_sids) / self.batch_size
+        for i, stmt_tpl_batch in self._raw_sid_stmt_iter(db, True):
+            try:
+                self._log("Processing batch %d/%d of %d/%d statements."
+                          % (i, num_batches, len(stmt_tpl_batch),
+                             len(self.raw_sids)))
+                # Get list of statements, generate mapping from uuid to sid.
+                self.stmts = []
+                self.uuid_sid_dict = {}
+                for sid, stmt in stmt_tpl_batch:
+                    self.uuid_sid_dict[stmt.uuid] = sid
+                    self.stmts.append(stmt)
 
-            # Get a list of statements and generate a mapping from uuid to sid.
-            stmts = []
-            uuid_sid_dict = {}
-            for sid, stmt in stmt_tpl_batch:
-                uuid_sid_dict[stmt.uuid] = sid
-                stmts.append(stmt)
+                # Map groundings and sequences.
+                self._clean_statements()
 
-            # Map groundings and sequences.
-            cleaned_stmts = self._clean_statements(stmts)
+                # Use the shallow hash to condense unique statements.
+                self._condense_statements()
 
-            # Use the shallow hash to condense unique statements.
-            new_unique_stmts, evidence_links, agent_tuples = \
-                self._condense_statements(cleaned_stmts, mk_done, new_mk_set,
-                                          uuid_sid_dict)
+                # Insert the statements and their links.
+                self._log("Insert new statements into database...")
+                insert_pa_stmts(db, self.new_pa_stmts, ignore_agents=True,
+                                commit=False)
+                self._log("Insert new raw_unique links into the database...")
+                db.copy('raw_unique_links', self._flattened_evidence_dict(),
+                        ('pa_stmt_mk_hash', 'raw_stmt_id'), commit=False)
+                db.copy('pa_agents', self.new_agent_tuples,
+                        ('stmt_mk_hash', 'ag_num', 'db_name', 'db_id', 'role'),
+                        lazy=True, commit=False)
+                insert_pa_agents(db, self.new_pa_stmts, verbose=True,
+                                 skip=['agents'])  # This will commit
 
-            # Insert the statements and their links.
-            self._log("Insert new statements into database...")
-            insert_pa_stmts(db, new_unique_stmts, ignore_agents=True,
-                            commit=False)
-            self._log("Insert new raw_unique links into the database...")
-            db.copy('raw_unique_links', flatten_evidence_dict(evidence_links),
-                    ('pa_stmt_mk_hash', 'raw_stmt_id'), commit=False)
-            db.copy('pa_agents', agent_tuples,
-                    ('stmt_mk_hash', 'ag_num', 'db_name', 'db_id', 'role'),
-                    lazy=True, commit=False)
-            insert_pa_agents(db, new_unique_stmts, verbose=True,
-                             skip=['agents'])  # This will commit
+                # Reset the pa statements
+                self.new_pa_stmts = None
+                self.new_agent_tuples = None
+                self.new_evidence_links = None
+            finally:
+                self.mk_done.dump()
+                self.mk_new.dump()
 
         self._log("Added %d new pa statements into the database."
-                   % len(new_mk_set))
-        return new_mk_set
+                  % len(self.mk_new))
+        return
+
+    def _flattened_evidence_dict(self):
+        return {(u_stmt_key, ev_stmt_uuid)
+                for u_stmt_key, ev_stmt_uuid_set in self.new_evidence_links.items()
+                for ev_stmt_uuid in ev_stmt_uuid_set}
 
     @clockit
-    def _condense_statements(self, cleaned_stmts, mk_done, new_mk_set,
-                             uuid_sid_dict):
+    def _condense_statements(self):
         self._log("Condense into unique statements...")
-        new_unique_stmts = []
-        evidence_links = defaultdict(lambda: set())
-        agent_tuples = set()
-        for s in cleaned_stmts:
+        self.new_pa_stmts = []
+        self.new_evidence_links = defaultdict(lambda: set())
+        self.new_agent_tuples = set()
+        for s in self.cleaned_stmts:
             h = shash(s)
 
             # If this statement is new, make it.
-            if h not in mk_done and h not in new_mk_set:
-                new_unique_stmts.append(s.make_generic_copy())
-                new_mk_set.add(h)
+            if h not in self.mk_done and h not in self.mk_new:
+                self.new_pa_stmts.append(s.make_generic_copy())
+                self.mk_new.add(h)
 
             # Add the evidence to the dict.
-            evidence_links[h].add(uuid_sid_dict[s.uuid])
+            self.new_evidence_links[h].add(self.uuid_sid_dict[s.uuid])
 
             # Add any db refs to the agents.
             ref_data, _, _ = extract_agent_data(s, h)
-            agent_tuples |= set(ref_data)
+            self.new_agent_tuples |= set(ref_data)
 
-        return new_unique_stmts, evidence_links, agent_tuples
+        return
 
     @_preassembly_wrapper
     @_tag('create')
@@ -316,7 +335,7 @@ class PreassemblyManager(object):
         For more detail on preassembly, see indra/preassembler/__init__.py
         """
         # Get filtered statement ID's.
-        stmt_ids = self._run_cached(distill_stmts, args=[db])
+        self.raw_sids = self._run_cached(distill_stmts, args=[db])
 
         # Handle the possibility we're picking up after an earlier job...
         done_pa_ids = set()
@@ -328,14 +347,13 @@ class PreassemblyManager(object):
                 checked_raw_stmt_ids, pa_stmt_hashes = \
                     zip(*db.select_all([db.RawUniqueLinks.raw_stmt_id,
                                         db.RawUniqueLinks.pa_stmt_mk_hash]))
-                stmt_ids -= set(checked_raw_stmt_ids)
-                done_pa_ids = set(pa_stmt_hashes)
+                self.raw_sids -= set(checked_raw_stmt_ids)
+                self.mk_done = self._get_cached_set('mk_done', pa_stmt_hashes)
                 self._log("Found %d preassembled statements already done."
                           % len(done_pa_ids))
 
         # Get the set of unique statements
-        self._extract_and_push_unique_statements(db, stmt_ids, len(stmt_ids),
-                                                 done_pa_ids)
+        self._extract_and_push_unique_statements(db)
 
         # If we are continuing, check for support links that were already found
         if continuing:
@@ -424,35 +442,39 @@ class PreassemblyManager(object):
         # Weed out exact duplicates.
         stmt_ids = self._run_cached(distill_stmts, args=[db],
                                     kwargs=dict(get_full_stmts=False))
-        new_stmt_ids = new_ids & stmt_ids
+        self.raw_sids = new_ids & stmt_ids
 
         # Get the set of new unique statements and link to any new evidence.
-        old_mk_set = {mk for mk, in db.select_all(db.PAStatements.mk_hash)}
-        self._log("Found %d old pa statements." % len(old_mk_set))
+        self.mk_done = {mk for mk, in db.select_all(db.PAStatements.mk_hash)}
+        self._log("Found %d old pa statements." % len(self.mk_done))
 
         new_mk_set, time_data = \
             self._run_cached(self._extract_and_push_unique_statements,
-                             args=[db, new_stmt_ids, len(new_stmt_ids),
-                                   old_mk_set],
+                             args=[db],
                              other_data={'start_date': start_date},
                              after_comps={'end_date': datetime.utcnow})
         start_date = time_data['start_date']
         end_date = time_data['end_date']
 
         if self.__continuing:
-            self._log("Original old mk set: %d" % len(old_mk_set))
-            old_mk_set = old_mk_set - new_mk_set
+            self._log("Original old mk set: %d" % len(self.mk_done))
+            old_mk_set = self.mk_done - new_mk_set
             self._log("Adjusted old mk set: %d" % len(old_mk_set))
 
         self._log("Found %d new pa statements." % len(new_mk_set))
         return start_date, end_date
 
-    def _get_cached_set(self, name):
+    def _get_cached_set(self, name, iterable=None):
         pkl_path = path.join(self.__cache, name + "_set_cache.pkl")
 
         if self.__continuing:
-            return CachedSet.load(pkl_path)
-        return CachedSet(pkl_path)
+            s = CachedSet.load(pkl_path)
+            if iterable:
+                s |= set(iterable)
+        if iterable:
+            return CachedSet(pkl_path, iterable)
+        else:
+            return CachedSet(pkl_path)
 
     @_tag('supplement')
     def _supplement_support(self, db, start_date, end_date):
@@ -560,7 +582,7 @@ class PreassemblyManager(object):
         getattr(logger, level)("(%s) %s" % (self.__tag, msg))
 
     @clockit
-    def _clean_statements(self, stmts):
+    def _clean_statements(self):
         """Perform grounding, sequence mapping, and find unique set from stmts.
 
         This method returns a list of statement objects, as well as a set of
@@ -568,10 +590,12 @@ class PreassemblyManager(object):
         raw (evidence) statements and their unique/preassembled counterparts.
         """
         self._log("Map grounding...")
-        stmts = ac.map_grounding(stmts)
+        stmts = ac.map_grounding(self.stmts)
         self._log("Map sequences...")
         stmts = ac.map_sequence(stmts, use_cache=True)
-        return stmts
+
+        self.cleaned_stmts = stmts
+        return
 
     @clockit
     def _get_support_links(self, unique_stmts, split_idx=None):
@@ -593,9 +617,9 @@ class PreassemblyManager(object):
 
 class CachedSet(set):
 
-    def __init__(self, cache):
+    def __init__(self, cache, *args, **kwargs):
         self.cache = cache
-        super().__init__(self)
+        super(CachedSet, self).__init__(*args, **kwargs)
 
     def dump(self):
         with open(self.cache, 'wb') as f:
@@ -634,12 +658,6 @@ def make_graph(unique_stmts, match_key_maps):
         g.add_edge(unique_stmts_dict[k1], unique_stmts_dict[k2])
 
     return g
-
-
-def flatten_evidence_dict(ev_dict):
-    return {(u_stmt_key, ev_stmt_uuid)
-            for u_stmt_key, ev_stmt_uuid_set in ev_dict.items()
-            for ev_stmt_uuid in ev_stmt_uuid_set}
 
 
 def _make_parser():
