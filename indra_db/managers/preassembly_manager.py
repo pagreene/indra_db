@@ -160,7 +160,7 @@ class PreassemblyManager(object):
             other_data = {}
 
         # Define the path to the pickle.
-        pkl_path = path.join(self.__cache, func.__name__ + "_results")
+        pkl_path = path.join(self.__cache, func.__name__ + "_results.pkl")
 
         # If we are continuing, just reload the content from the cache.
         if self.__continuing and path.exists(pkl_path):
@@ -410,7 +410,7 @@ class PreassemblyManager(object):
         return all_new_stmt_ids
 
     @_tag('supplement')
-    def _supplement_statements(self, db, continuing=False):
+    def _supplement_statements(self, db):
         """Supplement the preassembled statements with the latest content."""
         last_update = self._get_latest_updatetime(db)
         start_date = datetime.utcnow()
@@ -439,7 +439,7 @@ class PreassemblyManager(object):
         start_date = time_data['start_date']
         end_date = time_data['end_date']
 
-        if continuing:
+        if self.__continuing:
             self._log("Original old mk set: %d" % len(old_mk_set))
             old_mk_set = old_mk_set - new_mk_set
             self._log("Adjusted old mk set: %d" % len(old_mk_set))
@@ -447,22 +447,19 @@ class PreassemblyManager(object):
         self._log("Found %d new pa statements." % len(new_mk_set))
         return start_date, end_date
 
+    def _get_cached_set(self, name):
+        pkl_path = path.join(self.__cache, name + "_set_cache.pkl")
+
+        if self.__continuing:
+            return CachedSet.load(pkl_path)
+        return CachedSet(pkl_path)
+
     @_tag('supplement')
-    def _supplement_support(self, db, start_date, end_date, continuing=False):
+    def _supplement_support(self, db, start_date, end_date):
         """Calculate the support for the given date range of pa statements."""
         # If we are continuing, check for support links that were already found
-        support_link_stash = 'new_support_links.pkl'
-        self.pickle_stashes.append(support_link_stash)
-        if continuing and path.exists(support_link_stash):
-            with open(support_link_stash, 'rb') as f:
-                status_dict = pickle.load(f)
-                new_support_links = status_dict['existing links']
-                npa_done = status_dict['ids done']
-            self._log("Found %d previously found new links."
-                      % len(new_support_links))
-        else:
-            new_support_links = set()
-            npa_done = set()
+        new_support_links = self._get_cached_set('new_support_links')
+        npa_done = self._get_cached_set('npa_done')
 
         self._log("Downloading all pre-existing support links")
         existing_links = {(a, b) for a, b in
@@ -525,9 +522,9 @@ class PreassemblyManager(object):
             finally:
                 # Stash the new support links in case we crash.
                 new_support_links |= (some_support_links - existing_links)
-                with open(support_link_stash, 'wb') as f:
-                    pickle.dump({'existing links': new_support_links,
-                                 'ids done': npa_done}, f)
+                new_support_links.dump()
+                npa_done.dump()
+
             npa_done |= {s.get_hash(shallow=True) for s in npa_batch}
 
         # Insert any remaining support links.
@@ -551,18 +548,8 @@ class PreassemblyManager(object):
         would achieve if you had simply re-run preassembly on _all_ the
         raw statements.
         """
-
-        self.pickle_stashes = []
-
-        start_date, end_date = self._supplement_statements(db, continuing)
-        self._supplement_support(db, start_date, end_date, continuing)
-
-        # Remove all the caches so they can't be picked up accidentally later.
-        for cache in self.pickle_stashes:
-            if path.exists(cache):
-                remove(cache)
-        self.pickle_stashes = None
-
+        start_date, end_date = self._supplement_statements(db)
+        self._supplement_support(db, start_date, end_date)
         return True
 
     def _log(self, msg, level='info'):
@@ -602,6 +589,24 @@ class PreassemblyManager(object):
             ret.add(hash_pair)
 
         return ret
+
+
+class CachedSet(set):
+
+    def __init__(self, cache):
+        self.cache = cache
+        super().__init__(self)
+
+    def dump(self):
+        with open(self.cache, 'wb') as f:
+            pickle.dump(self, f)
+
+    @classmethod
+    def load(cls, cache):
+        if path.exists(cache):
+            with open(cache, 'rb') as f:
+                return pickle.load(f)
+        return cls(cache)
 
 
 def _stmt_from_json(stmt_json_bytes):
