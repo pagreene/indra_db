@@ -21,7 +21,7 @@ from indra_db.util import insert_pa_stmts, distill_stmts, get_db, \
     extract_agent_data, insert_pa_agents
 
 site_logger.setLevel(logging.INFO)
-grounding_logger.setLevel(logging.WARNING)
+#grounding_logger.setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 HERE = path.dirname(path.abspath(__file__))
@@ -153,7 +153,12 @@ class PreassemblyManager(object):
             return None
         return max([u.run_datetime for u in update_list])
 
-    def _run_cached(self, func, *args, **kwargs):
+    def _run_cached(self, func, args=None, kwargs=None, other_data=None,
+                    before_comps=None, after_comps=None):
+        # Handle None other_data
+        if other_data is None:
+            other_data = {}
+
         # Define the path to the pickle.
         pkl_path = path.join(self.__cache, func.__name__ + "_results")
 
@@ -162,16 +167,36 @@ class PreassemblyManager(object):
             with open(pkl_path, 'rb') as f:
                 self._log("Loading %s results from %s."
                           % (func.__name__, pkl_path))
-                return pickle.load(f)
+                pkl_dict = pickle.load(f)
+                if pkl_dict['other_data']:
+                    return pkl_dict['ret'], pkl_dict['other_data']
+                return pkl_dict['ret']
+
+        # Set arg and kwargs defaults.
+        if args is None:
+            args = []
+        if kwargs is None:
+            kwargs = {}
+
+        # Run pre-function computations
+        for label, comp in before_comps.items():
+            other_data[label] = comp()
 
         # Run the function.
         ret = func(*args, **kwargs)
+
+        # Run post-function computations
+        for label, comp in after_comps.items():
+            other_data[label] = comp()
 
         # Dump the results to the cache.
         with open(pkl_path, 'wb') as f:
             self._log("Dumping results of %s to %s."
                       % (func.__name__, pkl_path))
-            pickle.dump(ret, f)
+            if other_data:
+                pickle.dump({'ret': ret, 'other_data': other_data}, f)
+            else:
+                pickle.dump({'ret': ret, 'other_data': None}, f)
 
         return ret
 
@@ -291,7 +316,7 @@ class PreassemblyManager(object):
         For more detail on preassembly, see indra/preassembler/__init__.py
         """
         # Get filtered statement ID's.
-        stmt_ids = self._run_cached(distill_stmts, db)
+        stmt_ids = self._run_cached(distill_stmts, args=[db])
 
         # Handle the possibility we're picking up after an earlier job...
         done_pa_ids = set()
@@ -394,53 +419,26 @@ class PreassemblyManager(object):
         # Get the new statements...
         self._log("Loading info about the existing state of preassembly. "
                   "(This may take a little time)")
-        new_id_stash = 'new_ids.pkl'
-        self.pickle_stashes.append(new_id_stash)
-        if continuing and path.exists(new_id_stash):
-            self._log("Loading new statement ids from cache...")
-            with open(new_id_stash, 'rb') as f:
-                new_ids = pickle.load(f)
-        else:
-            new_ids = self._get_new_stmt_ids(db)
-
-            # Stash the new ids in case we need to pick up where we left off.
-            with open(new_id_stash, 'wb') as f:
-                pickle.dump(new_ids, f)
+        new_ids = self._run_cached(self._get_new_stmt_ids, args=[db])
 
         # Weed out exact duplicates.
-        dist_stash = 'stmt_ids.pkl'
-        self.pickle_stashes.append(dist_stash)
-        if continuing and path.exists(dist_stash):
-            self._log("Loading distilled statement ids from cache...")
-            with open(dist_stash, 'rb') as f:
-                stmt_ids = pickle.load(f)
-        else:
-            stmt_ids = distill_stmts(db, get_full_stmts=False)
-            with open(dist_stash, 'wb') as f:
-                pickle.dump(stmt_ids, f)
-
+        stmt_ids = self._run_cached(distill_stmts, args=[db],
+                                    kwargs=dict(get_full_stmts=False))
         new_stmt_ids = new_ids & stmt_ids
 
         # Get the set of new unique statements and link to any new evidence.
         old_mk_set = {mk for mk, in db.select_all(db.PAStatements.mk_hash)}
         self._log("Found %d old pa statements." % len(old_mk_set))
-        new_mk_stash = 'new_mk_set.pkl'
-        self.pickle_stashes.append(new_mk_stash)
-        if continuing and path.exists(new_mk_stash):
-            self._log("Loading hashes for new pa statements from cache...")
-            with open(new_mk_stash, 'rb') as f:
-                stash_dict = pickle.load(f)
-            start_date = stash_dict['start']
-            end_date = stash_dict['end']
-            new_mk_set = stash_dict['mk_set']
-        else:
-            new_mk_set = self._extract_and_push_unique_statements(db, new_stmt_ids,
-                                                                  len(new_stmt_ids),
-                                                                  old_mk_set)
-            end_date = datetime.utcnow()
-            with open(new_mk_stash, 'wb') as f:
-                pickle.dump({'start': start_date, 'end': end_date,
-                             'mk_set': new_mk_set}, f)
+
+        new_mk_set, time_data = \
+            self._run_cached(self._extract_and_push_unique_statements,
+                             args=[db, new_stmt_ids, len(new_stmt_ids),
+                                   old_mk_set],
+                             other_data={'start_date': start_date},
+                             after_comps={'end_date': datetime.utcnow})
+        start_date = time_data['start_date']
+        end_date = time_data['end_date']
+
         if continuing:
             self._log("Original old mk set: %d" % len(old_mk_set))
             old_mk_set = old_mk_set - new_mk_set
