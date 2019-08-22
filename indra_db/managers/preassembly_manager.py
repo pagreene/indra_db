@@ -590,11 +590,11 @@ class PreassemblyManager(object):
         raw (evidence) statements and their unique/preassembled counterparts.
         """
         self._log("Map grounding...")
-        stmts = ac.map_grounding(self.stmts)
+        grounded_stmts = ac.map_grounding(self.stmts)
         self._log("Map sequences...")
-        stmts = ac.map_sequence(stmts, use_cache=True)
+        mapped_stmts = ac.map_sequence(grounded_stmts, use_cache=True)
 
-        self.cleaned_stmts = stmts
+        self.cleaned_stmts = mapped_stmts
         return
 
     @clockit
