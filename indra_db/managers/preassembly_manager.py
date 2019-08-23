@@ -21,7 +21,7 @@ from indra_db.util import insert_pa_stmts, distill_stmts, get_db, \
     extract_agent_data, insert_pa_agents
 
 site_logger.setLevel(logging.INFO)
-#grounding_logger.setLevel(logging.WARNING)
+grounding_logger.setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 HERE = path.dirname(path.abspath(__file__))
@@ -117,6 +117,11 @@ class PreassemblyManager(object):
 
     def fossilize(self, error=None):
         pkl_file = 'manager_fossil_%s.pkl' % self.__pa_start.strftime(DATE_FMT)
+
+        # Convert all defaultdicts to dicts for pickling.
+        for name, val in self.__dict__.items():
+            if isinstance(val, defaultdict):
+                setattr(self, name, dict(val))
 
         with open(path.join(self.__cache, pkl_file), 'wb') as f:
             pickle.dump({'preassembly_manager': self, 'error': error}, f)
@@ -246,7 +251,7 @@ class PreassemblyManager(object):
         self._log("There are %d distilled raw statement ids to preassemble."
                   % len(self.raw_sids))
 
-        self.mk_new = self._get_cached_set('new_mk')
+        self.mk_new = self._get_cached_set('mk_new')
 
         num_batches = len(self.raw_sids) / self.batch_size
         for i, stmt_tpl_batch in self._raw_sid_stmt_iter(db, True):
