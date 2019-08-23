@@ -345,7 +345,7 @@ class PreassemblyManager(object):
         self.raw_sids = self._run_cached(distill_stmts, args=[db])
 
         # Handle the possibility we're picking up after an earlier job...
-        done_pa_ids = set()
+        self.mk_done = self._get_cached_set('mk_done')
         if continuing:
             self._log("Getting set of statements already de-duplicated...")
             link_resp = db.select_all([db.RawUniqueLinks.raw_stmt_id,
@@ -355,9 +355,9 @@ class PreassemblyManager(object):
                     zip(*db.select_all([db.RawUniqueLinks.raw_stmt_id,
                                         db.RawUniqueLinks.pa_stmt_mk_hash]))
                 self.raw_sids -= set(checked_raw_stmt_ids)
-                self.mk_done = self._get_cached_set('mk_done', pa_stmt_hashes)
+                self.mk_done |= self._get_cached_set('mk_done', pa_stmt_hashes)
                 self._log("Found %d preassembled statements already done."
-                          % len(done_pa_ids))
+                          % len(self.mk_done))
 
         # Get the set of unique statements
         self._extract_and_push_unique_statements(db)
