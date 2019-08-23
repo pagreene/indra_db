@@ -195,15 +195,17 @@ class PreassemblyManager(object):
             kwargs = {}
 
         # Run pre-function computations
-        for label, comp in before_comps.items():
-            other_data[label] = comp()
+        if before_comps:
+            for label, comp in before_comps.items():
+                other_data[label] = comp()
 
         # Run the function.
         ret = func(*args, **kwargs)
 
         # Run post-function computations
-        for label, comp in after_comps.items():
-            other_data[label] = comp()
+        if after_comps:
+            for label, comp in after_comps.items():
+                other_data[label] = comp()
 
         # Dump the results to the cache.
         with open(pkl_path, 'wb') as f:
