@@ -311,7 +311,7 @@ class PreassemblyManager(object):
         self.new_evidence_links = defaultdict(lambda: set())
         self.new_agent_tuples = set()
         for s in self.cleaned_stmts:
-            h = shash(s)
+            h = shash(s, refresh=True)
 
             # If this statement is new, make it.
             if h not in self.mk_done and h not in self.mk_new:
@@ -645,9 +645,9 @@ def _stmt_from_json(stmt_json_bytes):
 
 
 # This is purely for reducing having to type this long thing so often.
-def shash(s):
+def shash(s, refresh=False):
     """Get the shallow hash of a statement."""
-    return s.get_hash(shallow=True)
+    return s.get_hash(shallow=True, refresh=refresh)
 
 
 def make_graph(unique_stmts, match_key_maps):
