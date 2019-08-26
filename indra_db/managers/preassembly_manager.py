@@ -299,10 +299,21 @@ class PreassemblyManager(object):
                   % len(self.mk_new))
         return
 
-    def _flattened_evidence_dict(self):
-        return {(u_stmt_key, ev_stmt_uuid)
-                for u_stmt_key, ev_stmt_uuid_set in self.new_evidence_links.items()
-                for ev_stmt_uuid in ev_stmt_uuid_set}
+    @clockit
+    def _clean_statements(self):
+        """Perform grounding, sequence mapping, and find unique set from stmts.
+
+        This method returns a list of statement objects, as well as a set of
+        tuples of the form (uuid, matches_key) which represent the links between
+        raw (evidence) statements and their unique/preassembled counterparts.
+        """
+        self._log("Map grounding...")
+        grounded_stmts = ac.map_grounding(self.stmts)
+        self._log("Map sequences...")
+        mapped_stmts = ac.map_sequence(grounded_stmts, use_cache=True)
+
+        self.cleaned_stmts = mapped_stmts
+        return
 
     @clockit
     def _condense_statements(self):
@@ -326,6 +337,11 @@ class PreassemblyManager(object):
             self.new_agent_tuples |= set(ref_data)
 
         return
+
+    def _flattened_evidence_dict(self):
+        return {(u_stmt_key, ev_stmt_uuid)
+                for u_stmt_key, ev_stmt_uuid_set in self.new_evidence_links.items()
+                for ev_stmt_uuid in ev_stmt_uuid_set}
 
     @_preassembly_wrapper
     @_tag('create')
@@ -587,22 +603,6 @@ class PreassemblyManager(object):
             print("Preassembly Manager [%s] (%s): %s"
                   % (datetime.now(), self.__tag, msg))
         getattr(logger, level)("(%s) %s" % (self.__tag, msg))
-
-    @clockit
-    def _clean_statements(self):
-        """Perform grounding, sequence mapping, and find unique set from stmts.
-
-        This method returns a list of statement objects, as well as a set of
-        tuples of the form (uuid, matches_key) which represent the links between
-        raw (evidence) statements and their unique/preassembled counterparts.
-        """
-        self._log("Map grounding...")
-        grounded_stmts = ac.map_grounding(self.stmts)
-        self._log("Map sequences...")
-        mapped_stmts = ac.map_sequence(grounded_stmts, use_cache=True)
-
-        self.cleaned_stmts = mapped_stmts
-        return
 
     @clockit
     def _get_support_links(self, unique_stmts, split_idx=None):
