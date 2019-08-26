@@ -454,6 +454,8 @@ class PreassemblyManager(object):
     def _supplement_statements(self, db):
         """Supplement the preassembled statements with the latest content."""
         last_update = self._get_latest_updatetime(db)
+        assert last_update is not None, \
+            "The preassembly tables have not yet been initialized."
         start_date = datetime.utcnow()
         self._log("Latest update was: %s" % last_update)
 
