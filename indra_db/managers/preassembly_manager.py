@@ -101,6 +101,7 @@ class PreassemblyManager(object):
         self.new_pa_stmts = None
         self.new_agent_tuples = None
         self.new_evidence_links = None
+        self.current_batch = None
         self.uuid_sid_dict = None
         self.mk_done = None
         self.mk_new = None
@@ -257,6 +258,7 @@ class PreassemblyManager(object):
 
         num_batches = len(self.raw_sids) / self.batch_size
         for i, stmt_tpl_batch in self._raw_sid_stmt_iter(db, True):
+            self.current_batch = i
             try:
                 self._log("Processing batch %d/%d of %d/%d statements."
                           % (i, num_batches, len(stmt_tpl_batch),
@@ -297,6 +299,7 @@ class PreassemblyManager(object):
 
         self._log("Added %d new pa statements into the database."
                   % len(self.mk_new))
+        self.current_batch = None
         return
 
     @clockit
