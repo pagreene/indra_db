@@ -476,7 +476,8 @@ class PreassemblyManager(object):
         self.raw_sids = new_ids & stmt_ids
 
         # Get the set of new unique statements and link to any new evidence.
-        self.mk_done = {mk for mk, in db.select_all(db.PAStatements.mk_hash)}
+        self.mk_done = self._get_cached_set('mk_done')
+        self.mk_done |= {mk for mk, in db.select_all(db.PAStatements.mk_hash)}
         self._log("Found %d old pa statements." % len(self.mk_done))
 
         new_mk_set, time_data = \
