@@ -105,6 +105,8 @@ class PreassemblyManager(object):
         self.uuid_sid_dict = None
         self.mk_done = None
         self.mk_new = None
+        self.existing_support = None
+        self.new_support = None
         return
 
     def _set_tag(self, tag):
@@ -365,7 +367,7 @@ class PreassemblyManager(object):
 
         # Handle the possibility we're picking up after an earlier job...
         self.mk_done = self._get_cached_set('mk_done')
-        if continuing:
+        if continuing and not self.mk_done.from_cache:
             self._log("Getting set of statements already de-duplicated...")
             link_resp = db.select_all([db.RawUniqueLinks.raw_stmt_id,
                                        db.RawUniqueLinks.pa_stmt_mk_hash])
@@ -382,19 +384,19 @@ class PreassemblyManager(object):
         self._extract_and_push_unique_statements(db)
 
         # If we are continuing, check for support links that were already found
-        if continuing:
+        self.existing_support = self._get_cached_set('support_links')
+        if continuing and not self.existing_support.from_cache:
             self._log("Getting pre-existing links...")
             db_existing_links = db.select_all([
                 db.PASupportLinks.supporting_mk_hash,
                 db.PASupportLinks.supporting_mk_hash
                 ])
-            existing_links = {tuple(res) for res in db_existing_links}
-            self._log("Found %d existing links." % len(existing_links))
-        else:
-            existing_links = set()
+            self.existing_support |= {tuple(res)
+                                      for res in db_existing_links}
+            self._log("Found %d existing links." % len(self.existing_support))
 
         # Now get the support links between all batches.
-        support_links = set()
+        self.new_support = set()
         outer_iter = db.select_all_batched(self.batch_size,
                                            db.PAStatements.json,
                                            order_by=db.PAStatements.mk_hash)
@@ -403,7 +405,7 @@ class PreassemblyManager(object):
             # Get internal support links
             self._log('Getting internal support links outer batch %d.'
                       % outer_idx)
-            some_support_links = self._get_support_links(outer_batch)
+            some_support = self._get_support_links(outer_batch)
 
             # Get links with all other batches
             inner_iter = db.select_all_batched(self.batch_size,
@@ -411,33 +413,34 @@ class PreassemblyManager(object):
                                                order_by=db.PAStatements.mk_hash,
                                                skip_idx=outer_idx)
             for inner_idx, inner_batch_jsons in inner_iter:
-                inner_batch = [_stmt_from_json(sj) for sj, in inner_batch_jsons]
+                inner_batch = [_stmt_from_json(sj)
+                               for sj, in inner_batch_jsons]
                 split_idx = len(inner_batch)
                 full_list = inner_batch + outer_batch
                 self._log('Getting support between outer batch %d and inner'
                           'batch %d.' % (outer_idx, inner_idx))
-                some_support_links |= \
+                some_support |= \
                     self._get_support_links(full_list, split_idx=split_idx)
 
             # Add all the new support links
-            support_links |= (some_support_links - existing_links)
+            self.new_support |= (some_support - self.existing_support)
 
             # There are generally few support links compared to the number of
             # statements, so it doesn't make sense to copy every time, but for
             # long preassembly, this allows for better failure recovery.
-            if len(support_links) >= self.batch_size:
+            if len(self.new_support) >= self.batch_size:
                 self._log("Copying batch of %d support links into db."
-                          % len(support_links))
-                db.copy('pa_support_links', support_links,
+                          % len(self.new_support))
+                db.copy('pa_support_links', self.new_support,
                         ('supported_mk_hash', 'supporting_mk_hash'))
-                existing_links |= support_links
-                support_links = set()
+                self.existing_support |= self.new_support
+                self.new_support = set()
 
         # Insert any remaining support links.
-        if support_links:
+        if self.new_support:
             self._log("Copying final batch of %d support links into db."
-                      % len(support_links))
-            db.copy('pa_support_links', support_links,
+                      % len(self.new_support))
+            db.copy('pa_support_links', self.new_support,
                     ('supported_mk_hash', 'supporting_mk_hash'))
 
         return True
@@ -631,6 +634,7 @@ class CachedSet(set):
 
     def __init__(self, cache, *args, **kwargs):
         self.cache = cache
+        self.from_cache = False
         super(CachedSet, self).__init__(*args, **kwargs)
 
     def dump(self):
@@ -641,7 +645,9 @@ class CachedSet(set):
     def load(cls, cache):
         if path.exists(cache):
             with open(cache, 'rb') as f:
-                return pickle.load(f)
+                s = pickle.load(f)
+                s.from_cache = True
+                return s
         return cls(cache)
 
 
